@@ -1,0 +1,7 @@
+runpod
+boto3
+torch==2.4.1
+torchaudio==2.4.1
+accelerate
+transformers
+# Note: Add 'chatterbox' or your specific TTS library dependencies here
