@@ -1,14 +1,21 @@
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.1.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 # Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
+# Install system dependencies and Python 3.11
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    python3.11-venv \
     ffmpeg \
     git \
     wget \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3
 
 # Set working directory
 WORKDIR /app
