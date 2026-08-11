@@ -1,29 +1,22 @@
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+FROM runpod/base:0.6.2-cuda12.2.0
 
-ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/app/hf_cache
 
-# Install Python 3.11 + system deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-dev \
-    python3-pip \
-    python3.11-venv \
-    ffmpeg \
-    git \
-    wget \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Install torch+torchaudio with CUDA 12.4 first
+RUN pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
-# Pre-download model weights (faster cold start)
+# Install chatterbox-tts deps manually (skip torch conflict)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --no-deps chatterbox-tts
+
+# Pre-download model weights
 RUN python -c "from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cpu')" || true
 
 COPY handler.py /app/handler.py
