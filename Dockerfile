@@ -3,6 +3,7 @@ FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/app/hf_cache
 
 # Install system dependencies and Python 3.11
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,8 +26,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the base Chatterbox model (Optional but highly recommended)
-# RUN git clone https://huggingface.co/your-repo/chatterbox-base /app/chatterbox-base
+# Pre-download Chatterbox model weights during build (faster cold start)
+RUN python -c "from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cpu')" || true
 
 # Copy the serverless handler
 COPY handler.py /app/handler.py
