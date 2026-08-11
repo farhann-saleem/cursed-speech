@@ -1,3 +1,4 @@
+# Cache-bust: rebuild clean
 FROM runpod/base:0.6.2-cuda12.2.0
 
 ENV PYTHONUNBUFFERED=1
