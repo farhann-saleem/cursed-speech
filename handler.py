@@ -19,7 +19,7 @@ def load_model():
     print("Model loaded.")
 
 
-def _generate_single(text, ref_audio_base64, exaggeration=0.5, cfg_weight=0.5):
+def _generate_single(text, ref_audio_base64, exaggeration=0.5, cfg_weight=0.5, job_input=None):
     """Generate TTS with voice cloning. ref_audio_base64 is REQUIRED."""
     # Write inline ref wav to tmp (cached by content hash)
     cache_key = hash(ref_audio_base64[:200])
@@ -33,8 +33,27 @@ def _generate_single(text, ref_audio_base64, exaggeration=0.5, cfg_weight=0.5):
         REF_CACHE[cache_key] = ref_local
         print(f"Cached ref wav: {ref_local} ({len(audio_bytes)} bytes)")
 
-    wav = MODEL.generate(text, audio_prompt_path=ref_local,
-                         exaggeration=exaggeration, cfg_weight=cfg_weight)
+    # If a custom model URL is provided, we use a temporary model instance to prevent corrupting the global state
+    model_url = job_input.get("model_url")
+    
+    if model_url:
+        print(f"Loading custom LoRA from {model_url}...")
+        temp_model = ChatterboxTTS.from_pretrained(device="cuda")
+        
+        # Download the safetensors file
+        import urllib.request
+        lora_path = "/tmp/temp_lora"
+        os.makedirs(lora_path, exist_ok=True)
+        urllib.request.urlretrieve(model_url, os.path.join(lora_path, "adapter_model.safetensors"))
+        
+        temp_model.load_lora(lora_path)
+        wav = temp_model.generate(text, audio_prompt_path=ref_local,
+                             exaggeration=exaggeration, cfg_weight=cfg_weight)
+        del temp_model
+        torch.cuda.empty_cache()
+    else:
+        wav = MODEL.generate(text, audio_prompt_path=ref_local,
+                             exaggeration=exaggeration, cfg_weight=cfg_weight)
 
     buf = io.BytesIO()
     torchaudio.save(buf, wav, MODEL.sr, format="wav")
@@ -95,7 +114,7 @@ def handler(job):
                 continue
 
             try:
-                audio_b64 = _generate_single(text, ref, exaggeration, cfg_weight)
+                audio_b64 = _generate_single(text, ref, exaggeration, cfg_weight, job_input)
                 results.append({
                     "id": line_id,
                     "audio_base64": audio_b64,
@@ -121,7 +140,7 @@ def handler(job):
     cfg_weight = job_input.get("cfg_weight", 0.5)
 
     try:
-        audio_b64 = _generate_single(text, ref, exaggeration, cfg_weight)
+        audio_b64 = _generate_single(text, ref, exaggeration, cfg_weight, job_input)
         return {"audio_base64": audio_b64, "status": "success"}
     except Exception as e:
         return {"error": str(e)}
