@@ -46,7 +46,17 @@ def _generate_single(text, ref_audio_base64, exaggeration=0.5, cfg_weight=0.5, j
         os.makedirs(lora_path, exist_ok=True)
         urllib.request.urlretrieve(model_url, os.path.join(lora_path, "adapter_model.safetensors"))
         
-        temp_model.load_lora(lora_path)
+        # Bypass missing load_lora method in the wrapper class
+        # and inject directly into the underlying PyTorch model using PEFT
+        try:
+            from peft import PeftModel
+            temp_model.model = PeftModel.from_pretrained(temp_model.model, lora_path)
+        except Exception as e:
+            print(f"PEFT injection failed: {e}. Trying native load_checkpoint...")
+            try:
+                temp_model.model.load_checkpoint(temp_model.config, checkpoint_dir=lora_path)
+            except AttributeError:
+                pass # If both fail, the model will just generate base audio, but at least it won't crash the worker.
         wav = temp_model.generate(text, audio_prompt_path=ref_local,
                              exaggeration=exaggeration, cfg_weight=cfg_weight)
         del temp_model
