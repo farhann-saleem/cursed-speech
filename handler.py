@@ -1,6 +1,5 @@
 import runpod
 import os
-import boto3
 import torch
 import torchaudio
 import base64
@@ -8,17 +7,9 @@ import io
 
 from chatterbox.tts import ChatterboxTTS
 
-# R2 Configuration
-s3 = boto3.client('s3',
-    endpoint_url=f"https://{os.environ.get('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com",
-    aws_access_key_id=os.environ.get('R2_ACCESS_KEY_ID'),
-    aws_secret_access_key=os.environ.get('R2_SECRET_ACCESS_KEY')
-)
-BUCKET_NAME = os.environ.get('R2_BUCKET_NAME', 'comfy')
-
 # Global State
 MODEL = None
-R2_CACHE = {}  # path -> local_path
+REF_CACHE = {}  # hash -> local_path
 
 
 def load_model():
@@ -28,38 +19,23 @@ def load_model():
     print("Model loaded.")
 
 
-def _download_from_r2(r2_key, local_path):
-    """Download file from R2, with local caching."""
-    if r2_key in R2_CACHE and os.path.exists(R2_CACHE[r2_key]):
-        return R2_CACHE[r2_key]
-
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    s3.download_file(BUCKET_NAME, r2_key, local_path)
-    R2_CACHE[r2_key] = local_path
-    return local_path
-
-
-def _generate_single(text, ref_wav_path=None, exaggeration=0.5, cfg_weight=0.5):
-    """Generate TTS for a single line. Returns base64-encoded WAV audio."""
-    # Download ref wav from R2 if provided
-    ref_local = None
-    if ref_wav_path:
-        safe_name = ref_wav_path.replace("/", "_")
-        ref_local = f"/tmp/ref_{safe_name}"
-        try:
-            _download_from_r2(ref_wav_path, ref_local)
-        except Exception as e:
-            print(f"Warning: could not download ref wav {ref_wav_path}: {e}")
-            ref_local = None
-
-    # Generate audio
-    if ref_local and os.path.exists(ref_local):
-        wav = MODEL.generate(text, audio_prompt_path=ref_local,
-                             exaggeration=exaggeration, cfg_weight=cfg_weight)
+def _generate_single(text, ref_audio_base64, exaggeration=0.5, cfg_weight=0.5):
+    """Generate TTS with voice cloning. ref_audio_base64 is REQUIRED."""
+    # Write inline ref wav to tmp (cached by content hash)
+    cache_key = hash(ref_audio_base64[:200])
+    if cache_key in REF_CACHE and os.path.exists(REF_CACHE[cache_key]):
+        ref_local = REF_CACHE[cache_key]
     else:
-        wav = MODEL.generate(text, exaggeration=exaggeration, cfg_weight=cfg_weight)
+        audio_bytes = base64.b64decode(ref_audio_base64)
+        ref_local = f"/tmp/ref_{cache_key}.wav"
+        with open(ref_local, "wb") as f:
+            f.write(audio_bytes)
+        REF_CACHE[cache_key] = ref_local
+        print(f"Cached ref wav: {ref_local} ({len(audio_bytes)} bytes)")
 
-    # Encode to base64 WAV
+    wav = MODEL.generate(text, audio_prompt_path=ref_local,
+                         exaggeration=exaggeration, cfg_weight=cfg_weight)
+
     buf = io.BytesIO()
     torchaudio.save(buf, wav, MODEL.sr, format="wav")
     return base64.b64encode(buf.getvalue()).decode()
@@ -67,57 +43,59 @@ def _generate_single(text, ref_wav_path=None, exaggeration=0.5, cfg_weight=0.5):
 
 def handler(job):
     """
-    Handles both single TTS and batch TTS requests.
+    Voice-cloned TTS only. No ref audio = error, never default voice.
 
-    Single request format:
+    Single:
     {
         "input": {
             "text": "Hello world",
-            "voice_id": "nova",
-            "ref_wav_path": "voices/nova/excited.wav",
+            "ref_audio_base64": "<base64 wav>",
             "exaggeration": 0.5,
             "cfg_weight": 0.5
         }
     }
 
-    Batch request format (from pipeline s4_voice.py):
+    Batch:
     {
         "input": {
             "action": "tts_batch",
+            "ref_audio_base64": "<base64 wav>",
             "lines": [
-                {
-                    "id": "L01",
-                    "text": "WHAT IS HAPPENING?!",
-                    "speaker": "Nova",
-                    "ref_wav_path": "voices/nova/excited.wav"
-                }
+                {"id": "L01", "text": "WHAT?!", "speaker": "Nova"}
             ]
         }
     }
+    Note: batch ref_audio_base64 at top level = shared ref for all lines.
+    Per-line ref_audio_base64 overrides batch-level ref.
     """
     job_input = job.get("input", {})
     action = job_input.get("action", "tts_single")
 
-    # ── Batch TTS (from pipeline) ───────────────────────────────────────
+    # ── Batch TTS ─────────────────────────────────────────────────────
     if action == "tts_batch":
         lines = job_input.get("lines", [])
         if not lines:
             return {"error": "No lines provided for tts_batch."}
 
+        batch_ref = job_input.get("ref_audio_base64")
         results = []
+
         for line in lines:
             line_id = line.get("id", "unknown")
             text = line.get("text", "")
-            ref_wav_path = line.get("ref_wav_path")
+            ref = line.get("ref_audio_base64") or batch_ref
             exaggeration = line.get("exaggeration", 0.5)
             cfg_weight = line.get("cfg_weight", 0.5)
 
             if not text:
                 results.append({"id": line_id, "error": "empty text"})
                 continue
+            if not ref:
+                results.append({"id": line_id, "error": "ref_audio_base64 required — no default voice"})
+                continue
 
             try:
-                audio_b64 = _generate_single(text, ref_wav_path, exaggeration, cfg_weight)
+                audio_b64 = _generate_single(text, ref, exaggeration, cfg_weight)
                 results.append({
                     "id": line_id,
                     "audio_base64": audio_b64,
@@ -130,21 +108,21 @@ def handler(job):
 
         return {"results": results}
 
-    # ── Single TTS ──────────────────────────────────────────────────────
+    # ── Single TTS ────────────────────────────────────────────────────
     text = job_input.get("text")
     if not text:
-        return {"error": "Text is required."}
+        return {"error": "text is required"}
 
-    ref_wav_path = job_input.get("ref_wav_path")
+    ref = job_input.get("ref_audio_base64")
+    if not ref:
+        return {"error": "ref_audio_base64 required — no default voice, won't waste credits"}
+
     exaggeration = job_input.get("exaggeration", 0.5)
     cfg_weight = job_input.get("cfg_weight", 0.5)
 
     try:
-        audio_b64 = _generate_single(text, ref_wav_path, exaggeration, cfg_weight)
-        return {
-            "audio_base64": audio_b64,
-            "status": "success"
-        }
+        audio_b64 = _generate_single(text, ref, exaggeration, cfg_weight)
+        return {"audio_base64": audio_b64, "status": "success"}
     except Exception as e:
         return {"error": str(e)}
 
